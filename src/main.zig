@@ -1,8 +1,4 @@
 const std = @import("std");
-const node = @import("./tree.zig");
+const Func = @import("./func.zig");
 
 pub fn main() !void {}
-
-test {
-    std.testing.refAllDeclsRecursive();
-}
