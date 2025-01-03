@@ -1,29 +1,25 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const math = std.math;
 
 const Tree = @This();
 allocator: Allocator,
 nodes: []Node,
-root_index: usize,
 
-pub fn init(allocator: Allocator, nodes_to_copy: []const Node, root_index: usize) !Tree {
+pub fn init(allocator: Allocator, nodes_to_copy: []const Node) !Tree {
     const nodes = try allocator.alloc(Node, nodes_to_copy.len);
     @memcpy(nodes, nodes_to_copy);
-
-    if (root_index >= nodes.len) {
-        return error.RootIndexOutOfBounds;
-    }
 
     return Tree{
         .allocator = allocator,
         .nodes = nodes,
-        .root_index = root_index,
     };
 }
 
 pub fn init_default(allocator: Allocator) !Tree {
-    const nodes = comptime [_]Node{.{ .Variable = .{ .name = 'x' } }};
-    return Tree.init(allocator, &nodes, 0);
+    const default_nodes = comptime [_]Node{.{ .Variable = .{ .name = 'x' } }};
+
+    return Tree.init(allocator, &default_nodes);
 }
 
 pub fn deinit(self: Tree) void {
@@ -31,7 +27,7 @@ pub fn deinit(self: Tree) void {
 }
 
 pub fn clone(self: Tree, allocator: Allocator) !Tree {
-    return Tree.init(allocator, self.nodes, self.root_index);
+    return Tree.init(allocator, self.nodes);
 }
 
 test "init, deinit, init_default, clone" {
@@ -40,15 +36,15 @@ test "init, deinit, init_default, clone" {
     const tests = .{
         [_]Tree.Node{Node.init_variable('x')},
         [_]Tree.Node{
+            Node.init_hyperop(0, 2, 3, .Sum),
             Node.init_variable('x'),
-            Node.init_hyperop(0, 2, 3, .Addition),
-            Node.init_constant(0),
-            Node.init_constant(0),
+            Node.init_constant(5),
+            Node.init_constant(1),
         },
     };
 
     inline for (tests) |nodes| {
-        var test_tree = try Tree.init(allocator, &nodes, 0);
+        var test_tree = try Tree.init(allocator, &nodes);
         defer test_tree.deinit();
     }
 
@@ -59,7 +55,7 @@ test "init, deinit, init_default, clone" {
 }
 
 pub const Node = union(Type) {
-    const Type = enum(u8) {
+    pub const Type = enum(u8) {
         Constant,
         Variable,
         HyperOp,
@@ -72,42 +68,61 @@ pub const Node = union(Type) {
     pub const Constant = struct {
         value: f64,
 
-        pub fn eval(self: Constant, nodes: []const Node) f64 {
+        const EvalError = error{IsNaN};
+
+        pub fn eval(self: Constant, nodes: []const Node) Constant.EvalError!f64 {
             _ = nodes;
+
+            if (math.isNan(self.value)) return error.IsNaN;
+
             return self.value;
         }
     };
     pub const Variable = struct {
         name: u8,
 
-        pub fn eval(self: Variable, nodes: []const Node) f64 {
+        const EvalError = error{DirectVariableEval};
+
+        pub fn eval(self: Variable, nodes: []const Node) Variable.EvalError!f64 {
             _ = self;
             _ = nodes;
-            @compileError("This shouldn't ever be called");
+            return error.DirectVariableEval;
         }
     };
     pub const HyperOp = struct {
-        subject: usize,
-        positive_factor: usize,
-        negative_factor: usize,
+        subject_index: usize,
+        positive_factor_index: usize,
+        negative_factor_index: usize,
         op_level: Level,
 
         pub const Level = enum(u8) {
-            Addition,
-            Multiplication,
-            Exponentiation,
+            Sum,
+            Product,
+            Power,
         };
 
-        pub fn eval(self: HyperOp, nodes: []const Node) f64 {
-            const sb: f64 = nodes[self.subject].eval(nodes);
-            const pf: f64 = nodes[self.positive_factor].eval(nodes);
-            const nf: f64 = nodes[self.negative_factor].eval(nodes);
+        const EvalError: type = error{ DivisionByZero, IsNaN };
 
-            return switch (self.op_level) {
-                .Addition => sb + (pf - nf),
-                .Multiplication => sb * (pf / nf),
-                .Exponentiation => std.math.pow(f64, sb, try std.math.divTrunc(pf, nf)),
+        pub fn eval(self: HyperOp, nodes: []const Node) Node.EvalError!f64 {
+            const sb: f64 = try nodes[self.subject_index].eval(nodes);
+            const pf: f64 = try nodes[self.positive_factor_index].eval(nodes);
+            const nf: f64 = try nodes[self.negative_factor_index].eval(nodes);
+
+            const result: f64 = switch (self.op_level) {
+                .Sum => sb + pf - nf,
+                .Product => blk: {
+                    const factor_combination = if (nf == 0) return error.DivisionByZero else pf / nf;
+                    break :blk sb * factor_combination;
+                },
+                .Power => blk: {
+                    const factor_combination = if (nf == 0) return error.DivisionByZero else pf / nf;
+                    break :blk math.pow(f64, sb, factor_combination);
+                },
             };
+
+            if (math.isNan(result)) return error.IsNaN;
+
+            return result;
         }
     };
 
@@ -122,19 +137,19 @@ pub const Node = union(Type) {
     pub fn init_hyperop(subject: usize, positive_factor: usize, negative_factor: usize, op_level: HyperOp.Level) Node {
         return Node{
             .HyperOp = Node.HyperOp{
-                .subject = subject,
-                .positive_factor = positive_factor,
-                .negative_factor = negative_factor,
+                .subject_index = subject,
+                .positive_factor_index = positive_factor,
+                .negative_factor_index = negative_factor,
                 .op_level = op_level,
             },
         };
     }
 
-    pub fn eval(self: Node, nodes: []const Node) f64 {
+    pub const EvalError = HyperOp.EvalError || Constant.EvalError || Variable.EvalError;
+
+    pub fn eval(self: Node, nodes: []const Node) Node.EvalError!f64 {
         return switch (self) {
-            .Constant => |node| node.eval(nodes),
-            .Variable => |node| node.eval(nodes),
-            .HyperOp => |node| node.eval(nodes),
+            inline else => |node| node.eval(nodes),
         };
     }
 };
